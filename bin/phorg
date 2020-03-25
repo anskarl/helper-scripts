@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+
+# Photo organizer script.
+#
+# The implemetation is inspired by https://jonblack.me/using-freenas-and-syncthing-to-automate-mobile-photo-organisation/
+
+# --- -------------------------------------------------------------------------
+# --- Required tools
+# --- -------------------------------------------------------------------------
+type exiftool >/dev/null 2>&1 || { echo >&2 "Program exiftool is not installed. Aborting."; exit 1; }
+
+# load poor mans logger :)
+. `dirname $0`/poor.mans.logger.sh
+
+
+cat << EOF
+       _               
+   ___| |_ ___ ___ ___ 
+  | . |   | . |  _| . |
+  |  _|_|_|___|_| |_  |
+  |_|             |___|
+
+EOF
+
+# --- -------------------------------------------------------------------------
+# --- Parameters with their default values
+# --- -------------------------------------------------------------------------
+
+: ${INPUT_DIR:="."}
+: ${OUTPUT_DIR:="."}
+: ${STAT:="/usr/bin/stat"}
+: ${MODE:="move"}
+
+: ${PREFIX_DT_PATTERN:="%Y%m%d_%H%M%S"}
+: ${PHOTO_FILES_PATTERN:="DSC_[0-9][0-9][0-9][0-9].NEF"}
+: ${VIDEO_FILES_PATTERN:="DSC_[0-9][0-9][0-9][0-9].MOV"}
+
+log_debug "param INPUT_DIR='${INPUT_DIR}'"
+log_debug "param OUTPUT_DIR='${OUTPUT_DIR}'"
+log_debug "param STAT='${STAT}'"
+log_debug "param MODE='${MODE}'"
+log_debug "param PREFIX_DT_PATTERN='${PREFIX_DT_PATTERN}'"
+log_debug "param PHOTO_FILES_PATTERN='${PHOTO_FILES_PATTERN}'"
+log_debug "param VIDEO_FILES_PATTERN='${VIDEO_FILES_PATTERN}'"
+
+# --- -------------------------------------------------------------------------
+# --- Utility functions
+# --- -------------------------------------------------------------------------
+
+# reformat a line to fit into a max with of characters
+#   arg 1: text to reformat
+#   arg 2: maximum number of characters (width, default is 80 characters)
+printFormatted(){
+  txt=${1}
+
+  if [[ -z ${2} ]]; then
+    spaces=2
+  else
+    spaces=${2}
+  fi
+
+  width=$((80-${spaces}))
+  prefix=$(printf "%${spaces}s")  #$(printf ' %.0s' {1..${spaces}})
+
+  echo ${txt} | fold -s -w ${width} | sed -e "s/^/${prefix}/"
+}
+
+print_usage(){
+    echo "Usage: $(basename ${0}) [-o PARAMETER=VALUE ...]"
+    echo ""
+    printFormatted "-h | --help : display this help."
+    printFormatted "-o | --option : set an option in the form of PARAMETER=VALUE, for example to enable dry run set -o MODE=dry"
+    echo ""
+    echo "Parameters:"
+    printFormatted "INPUT_DIR=<path> : Set the input path of files to organise (DEFAULT is current working path)"
+    printFormatted "OUTPUT_DIR=<path> : Set the output path of organized files (DEFAULT is current working path)"
+    printFormatted "STAT=<path> : Set the location of the 'stat' command (DEFAULT is '/usr/bin/stat')"
+    printFormatted "MODE=dry : Dry run, does not apply any changes, it just prints logging messages"
+    printFormatted "MODE=move : Reorganize by moving files (DEFAULT)"
+    printFormatted "MODE=copy : Reorganize by copying files"
+    printFormatted "PREFIX_DT_PATTERN=<date-time pattern> : Date-time pattern to use as prefix of the resulting files (DEFAULT is '%Y%m%d_%H%M%S')"
+    printFormatted "PHOTO_FILES_PATTERN=<filename pattern> : Filename pattern to match input photo files (DEFAULT is 'DSC_[0-9][0-9][0-9][0-9].NEF')"
+    printFormatted "PHOTO_FILES_PATTERN=<filename pattern> : Filename pattern to match input video files (DEFAULT is 'DSC_[0-9][0-9][0-9][0-9].MOV')"
+}
+
+
+reorganize(){
+
+    reorganize_mode=$1
+    filename=$2
+    c_date=$3
+    c_fdt=$4
+
+    c_date_y=$(echo "$c_date" | cut -d - -f 1)
+    c_date_m=$(echo "$c_date" | cut -d - -f 2)
+
+    target_path="$OUTPUT_DIR/$c_date_y/$c_date_m"
+
+    if [[ ! -d "${target_path}" ]]; then
+        log_info "Creating path '${target_path}'"
+        if [ $reorganize_mode -ne 0 ]; then
+            mkdir -p "${target_path}"
+        fi
+    fi
+        
+    # Add date/time to new filename to make files as unique as
+    # possible. Cameras are rubbish at filenaming, and duplicates
+    # are possible when multiple cameras are used.
+    filename_base=$(basename "$filename");
+    filename_raw="${filename_base%.*}";
+    filename_ext="${filename_base##*.}";
+
+    new_filename="${c_fdt}-${filename_raw}.${filename_ext}"
+
+    target_filepath="$OUTPUT_DIR/$c_date_y/$c_date_m/$new_filename"
+    
+    case ${reorganize_mode} in
+        0)
+            log_info "Copying/Moving '$filename' to '${target_filepath}'"
+        ;;
+        1)
+            log_info "Moving '$filename' to '${target_filepath}'"
+            mv "$filename" "${target_filepath}"
+        ;;
+        2)
+            log_info "Copying '$filename' to '${target_filepath}'"
+            cp "$filename" "${target_filepath}"
+        ;;
+        *)
+            log_info "Unknown mode '${reorganize_mode}'"
+            exit 1
+        ;;
+    esac
+}
+
+# --- -------------------------------------------------------------------------
+# --- Main
+# --- -------------------------------------------------------------------------
+
+# Load configuration options from file '.photos_env'
+if [[ -f ".photos_env" ]]; then
+    log_info "Using settings from local '.photos_env' file"
+    . `dirname $0`/.photos_env
+fi
+
+
+# Parse arguments
+while [[ $# -gt 0 ]]
+do
+    key="${1}"
+    case ${key} in
+
+    -o|--option)
+        eval "${2}"
+        shift 2 # parse argument and value
+        ;;
+
+    -h|--help)
+        print_usage
+        exit 0
+        ;;
+
+    *)  # unknown option
+        log_error "Error unknown argument '${1}'"
+        exit 1
+        ;;
+
+    esac
+done
+
+
+# setup mode (0 = demo mode, 1 = move files and 2 = copy files)
+_mode=0
+
+case ${MODE} in
+    dry)
+        log_info "Dry run, will only print log messages!"
+        _mode=0
+    ;;
+    move)
+        log_info "Reorganize by moving files"
+        _mode=1
+    ;;
+    copy)
+        log_info "Reorganize by copying files"
+        _mode=2
+    ;;
+    *)
+        log_error "Unknown mode '${MODE}'"
+        exit 1
+    ;;
+esac
+
+# Re-organize video files
+log_info "Step 1/2: Re-organizing video files..."
+
+for c_filename in $(find ${INPUT_DIR} -type f -name "${VIDEO_FILES_PATTERN}")
+do
+  c_date=`$STAT -f %Sm -t %Y-%m "${c_filename}"`
+  c_fdt=`$STAT -f %Sm -t ${PREFIX_DT_PATTERN} "${c_filename}"`
+
+  exit_code=$? 
+
+  if [[ $? -eq 0 ]]; then
+    reorganize "$_mode" "$c_filename" "$c_date" "$c_fdt"
+  fi
+done
+
+# Re-organize photo files
+log_info "Step 2/2: Re-organizing photo files..."
+
+for c_filename in $(find ${INPUT_DIR} -type f -name "${PHOTO_FILES_PATTERN}")
+do
+    # Get the creation date from the media format meta data. If not found,
+    # use the file modified time.    
+    c_date=`exiftool "${c_filename}" -CreateDate -d "%Y-%m" | cut -d : -f 2 | tr -d '[:space:]'`
+    c_fdt=`exiftool "${c_filename}" -CreateDate -d "${PREFIX_DT_PATTERN}" | cut -d : -f 2 | tr -d '[:space:]'`
+
+    if [[ "$c_date" == "0000" || "$c_date" == "" ]]; then
+        # The arguments for stat are specific to FreeNAS and are not very
+        # portable. This could break at any time. exiftool has
+        # FileModifyDate, try that some time.
+        c_date=`$STAT -f %Sm -t %Y-%m "${c_filename}"`
+        c_fdt=`$STAT -f %Sm -t ${PREFIX_DT_PATTERN} "${c_filename}"`
+    fi
+
+    exit_code=$? 
+
+    if [[ $? -eq 0 ]]; then
+        reorganize "$_mode" "${c_filename}" "$c_date" "$c_fdt"
+    fi
+done

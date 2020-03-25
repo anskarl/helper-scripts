@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+
+#
+# Simple backup script for storing directories to compressed tarballs 
+# along with their checksum. When pigz or pbzip2 are installed, the script
+# will prefer to use pigz or pbzip2, instead of gzip or bzip2 and thus
+# utilize all the available cores of the system.
+#
+
+# Take the timestamp where the backup is started
+DATE_TIME=$(date +%Y%m%d-%H_%M_%S)
+
+# Load poor mans logger :)
+. `dirname $0`/poor.mans.logger.sh
+
+
+# Display usage
+usage(){
+	echo "Usage: `basename $0` [-htz] <dir>"
+    echo "	or `basename $0` [-ht,z] <dir> <target path>"
+	echo "  -h : display this help."
+	echo "  -t : create tarball archive."
+	echo "  -z : create gzip compressed tarball archive (default)."
+	echo "  -j : create bzip2 compressed tarbal archive."
+}
+
+# compute checksum
+exec_checksum(){
+	file_path=$1
+	log_info "Producing checksum files (MD5 and SHA-256) for '$file_path'"
+	current_path=$(pwd)
+	base_name=$(basename $file_path)
+	echo $base_name
+	parent_dir=$(dirname $file_path)
+	cd "$parent_dir" &> /dev/null
+	md5sum "$base_name" > "$base_name".md5
+	shasum -a 256 -p "$base_name" > "$base_name".sha256
+	cd "$current_path" &> /dev/null
+}
+
+#
+# The backup function
+#
+# param $1: the archive type (gzip, tar)
+# param $2: the directory to archive
+# param $3: (optionaly) the target path to store the archive file,
+#	    otherwise the current path will be used
+#
+exec_backup(){
+
+base=""
+tar_params=""
+if [[ "$1" = "gzip" ]]; then
+	base=$(basename "$2")-"$DATE_TIME".tar.gz
+	cprog=$(which pigz)
+	
+	if [[ "$cprog" != "" ]]; then
+	    log_info "Creating compressed tarball archive '$base', using parallel gzip compression (pigz)."
+	else
+	    log_warn "Creating compressed tarball archive '$base', using single-threaded gzip compression."
+	fi
+	
+	tar_params="--use-compress-prog="${cprog:-gzip}
+elif [[ "$1" = "bzip2" ]]; then
+	base=$(basename "$2")-"$DATE_TIME".tar.bz2
+	cprog=$(which pbzip2)
+	
+	if [ "$cprog" != "" ]; then
+	    log_info "Creating compressed tarball archive '$base', using parallel bzip2 compression (pbzip2)."
+	else
+	    log_warn "Creating compressed tarball archive '$base', using single-threaded bzip2 compression."
+	fi
+	
+	tar_params="--use-compress-prog="${cprog:-bzip2}
+elif [[ "$1" = "tar" ]]; then
+	base=$(basename "$2")-"$DATE_TIME".tar
+	tar_params=""
+else
+	log_error "wrong archive type"
+	exit 10;
+fi
+
+unhidden=$(echo "$base" | sed 's/^[.]\(.*\)/\1/')
+
+if [[ $# -eq 2 ]]; then
+	if [ -d "$2" ]; then
+		tar "$tar_params" -cvpf "$unhidden" "$2" &> "${unhidden}.list" &&
+		exec_checksum "$unhidden"
+		exit 0
+	else
+		usage
+		exit 1
+	fi
+elif [[ $# -eq 3 ]]; then
+	if [ -d "$2" -a -d "$3" ]; then
+		tmp_file="$(basename "$3")/$unhidden"
+		target_file_path=$(dirname "$3")/"$tmp_file"
+		tar "$tar_params" -cvpf ${target_file_path} "$2" &> "${target_file_path}.list" && 
+		exec_checksum "$target_file_path"
+		exit 0
+	fi
+else
+	usage
+	exit 1
+fi
+}
+
+# SECTION: Program
+ARGS=$(getopt -o htzj -n 'backup' --  "$@")
+_args_exit_code=$?
+if [[ ${_args_exit_code} != 0 ]]; then 
+	log_fatal "Cannot parse arguments (exit code of 'getop' was '$_args_exit_code'), terminating..." 
+fi
+
+# Note the quotes around `$ARGS': they are essential!
+eval set -- "$ARGS"
+
+TYPE=
+for i in $ARGS 
+do
+	case "$i" in
+		-h) 
+		usage
+		exit 0
+		;;
+		-t) 
+		if [[ -n $TYPE ]]; then usage; fi
+		TYPE="tar"
+		shift
+		;;
+		-z) 
+		if [[ -n $TYPE ]]; then usage; fi
+		TYPE="gzip" 
+		shift
+		;;
+		-j) 
+		if [[ -n $TYPE ]]; then usage; fi
+		TYPE="bzip2" 
+		shift
+		;;
+		--) 
+		shift
+		break 
+		;;
+		*) 
+		echo "Internal error!" 
+			exit 1 
+		;;
+	esac
+done
+
+# By default create gzipped tarballs
+if [[ -z $TYPE ]]; then TYPE="gzip"; fi 
+
+exec_backup $TYPE $@
+
