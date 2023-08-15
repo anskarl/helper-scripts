@@ -9,8 +9,10 @@
 # --- -------------------------------------------------------------------------
 type exiftool >/dev/null 2>&1 || { echo >&2 "Program exiftool is not installed. Aborting."; exit 1; }
 
+: ${LOG_LEVEL:="INFO"}
+
 # load poor mans logger :)
-. `dirname $0`/poor.mans.logger.sh
+. $(dirname $0)/poor.mans.logger.sh
 
 
 cat << EOF
@@ -29,7 +31,7 @@ EOF
 : ${INPUT_DIR:="."}
 : ${OUTPUT_DIR:="."}
 : ${STAT:="/usr/bin/stat"}
-: ${MODE:="move"}
+: ${MODE:="copy"}
 
 : ${PREFIX_DT_PATTERN:="%Y%m%d_%H%M%S"}
 : ${PHOTO_FILES_PATTERN:="DSC_[0-9][0-9][0-9][0-9].NEF"}
@@ -42,6 +44,7 @@ log_debug "param MODE='${MODE}'"
 log_debug "param PREFIX_DT_PATTERN='${PREFIX_DT_PATTERN}'"
 log_debug "param PHOTO_FILES_PATTERN='${PHOTO_FILES_PATTERN}'"
 log_debug "param VIDEO_FILES_PATTERN='${VIDEO_FILES_PATTERN}'"
+log_debug "param LOG_LEVEL='${LOG_LEVEL}'"
 
 # --- -------------------------------------------------------------------------
 # --- Utility functions
@@ -60,7 +63,7 @@ printFormatted(){
   fi
 
   width=$((80-${spaces}))
-  prefix=$(printf "%${spaces}s")  #$(printf ' %.0s' {1..${spaces}})
+  prefix=$(printf "%${spaces}s")
 
   echo ${txt} | fold -s -w ${width} | sed -e "s/^/${prefix}/"
 }
@@ -75,12 +78,14 @@ print_usage(){
     printFormatted "INPUT_DIR=<path> : Set the input path of files to organise (DEFAULT is current working path)"
     printFormatted "OUTPUT_DIR=<path> : Set the output path of organized files (DEFAULT is current working path)"
     printFormatted "STAT=<path> : Set the location of the 'stat' command (DEFAULT is '/usr/bin/stat')"
-    printFormatted "MODE=dry : Dry run, does not apply any changes, it just prints logging messages"
-    printFormatted "MODE=move : Reorganize by moving files (DEFAULT)"
-    printFormatted "MODE=copy : Reorganize by copying files"
-    printFormatted "PREFIX_DT_PATTERN=<date-time pattern> : Date-time pattern to use as prefix of the resulting files (DEFAULT is '%Y%m%d_%H%M%S')"
+    printFormatted "MODE=<dry | move | copy>"
+    printFormatted "- dry  : Dry run, does not apply any changes, it just prints logging messages"
+    printFormatted "- move : Reorganize by moving files"
+    printFormatted "- copy : Reorganize by copying files (DEFAULT)"
+    printFormatted "PREFIX_DT_PATTERN=<date-time pattern>  : Date-time pattern to use as prefix of the resulting files (DEFAULT is '%Y%m%d_%H%M%S')"
     printFormatted "PHOTO_FILES_PATTERN=<filename pattern> : Filename pattern to match input photo files (DEFAULT is 'DSC_[0-9][0-9][0-9][0-9].NEF')"
-    printFormatted "PHOTO_FILES_PATTERN=<filename pattern> : Filename pattern to match input video files (DEFAULT is 'DSC_[0-9][0-9][0-9][0-9].MOV')"
+    printFormatted "VIDEO_FILES_PATTERN=<filename pattern> : Filename pattern to match input video files (DEFAULT is 'DSC_[0-9][0-9][0-9][0-9].MOV')"
+    printFormatted "LOG_LEVEL=<ALL | DEBUG | WARN | INFO | ERROR | OFF>: Specify the logging level (DEFAULT is ERROR)."
 }
 
 
@@ -97,7 +102,6 @@ reorganize(){
     target_path="$OUTPUT_DIR/$c_date_y/$c_date_m"
 
     if [[ ! -d "${target_path}" ]]; then
-        log_info "Creating path '${target_path}'"
         if [ $reorganize_mode -ne 0 ]; then
             mkdir -p "${target_path}"
         fi
@@ -110,13 +114,22 @@ reorganize(){
     filename_raw="${filename_base%.*}";
     filename_ext="${filename_base##*.}";
 
-    new_filename="${c_fdt}-${filename_raw}.${filename_ext}"
+    serial_no=$(exiftool  -SerialNumber ${filename} | cut -d : -f 2 | tr -d '[:space:]')
+    parent_dir=$(dirname ${c_filename} | xargs basename)
+    parent_dir="${parent_dir// /_}"
+    
+    if [[ "${parent_dir}" != "." ]]; then
+        new_filename="${parent_dir}-${c_fdt}-${serial_no}-${filename_raw}.${filename_ext}"
+    else
+        new_filename="${c_fdt}-${serial_no}-${filename_raw}.${filename_ext}"
+    fi
+
 
     target_filepath="$OUTPUT_DIR/$c_date_y/$c_date_m/$new_filename"
     
     case ${reorganize_mode} in
         0)
-            log_info "Copying/Moving '$filename' to '${target_filepath}'"
+            log_info "[DRY] Copying/Moving '$filename' to '${target_filepath}'"
         ;;
         1)
             log_info "Moving '$filename' to '${target_filepath}'"
@@ -140,7 +153,7 @@ reorganize(){
 # Load configuration options from file '.photos_env'
 if [[ -f ".photos_env" ]]; then
     log_info "Using settings from local '.photos_env' file"
-    . `dirname $0`/.photos_env
+    . $(dirname $0)/.photos_env
 fi
 
 
@@ -196,8 +209,8 @@ log_info "Step 1/2: Re-organizing video files..."
 
 for c_filename in $(find ${INPUT_DIR} -type f -name "${VIDEO_FILES_PATTERN}")
 do
-  c_date=`$STAT -f %Sm -t %Y-%m "${c_filename}"`
-  c_fdt=`$STAT -f %Sm -t ${PREFIX_DT_PATTERN} "${c_filename}"`
+  c_date=$($STAT -f %Sm -t %Y-%m "${c_filename}")
+  c_fdt=$($STAT -f %Sm -t ${PREFIX_DT_PATTERN} "${c_filename}")
 
   exit_code=$? 
 
@@ -213,15 +226,15 @@ for c_filename in $(find ${INPUT_DIR} -type f -name "${PHOTO_FILES_PATTERN}")
 do
     # Get the creation date from the media format meta data. If not found,
     # use the file modified time.    
-    c_date=`exiftool "${c_filename}" -CreateDate -d "%Y-%m" | cut -d : -f 2 | tr -d '[:space:]'`
-    c_fdt=`exiftool "${c_filename}" -CreateDate -d "${PREFIX_DT_PATTERN}" | cut -d : -f 2 | tr -d '[:space:]'`
+    c_date=$(exiftool "${c_filename}" -CreateDate -d "%Y-%m" | cut -d : -f 2 | tr -d '[:space:]')
+    c_fdt=$(exiftool "${c_filename}" -CreateDate -d "${PREFIX_DT_PATTERN}" | cut -d : -f 2 | tr -d '[:space:]')
 
     if [[ "$c_date" == "0000" || "$c_date" == "" ]]; then
         # The arguments for stat are specific to FreeNAS and are not very
         # portable. This could break at any time. exiftool has
         # FileModifyDate, try that some time.
-        c_date=`$STAT -f %Sm -t %Y-%m "${c_filename}"`
-        c_fdt=`$STAT -f %Sm -t ${PREFIX_DT_PATTERN} "${c_filename}"`
+        c_date=$($STAT -f %Sm -t %Y-%m "${c_filename}")
+        c_fdt=$($STAT -f %Sm -t ${PREFIX_DT_PATTERN} "${c_filename}")
     fi
 
     exit_code=$? 
