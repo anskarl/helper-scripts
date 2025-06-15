@@ -283,11 +283,15 @@ case ${MODE} in
         _mode=0
     ;;
     move)
-        log_info "Reorganize by moving files"
+        if [[ $single_file_logging -eq 0 ]]; then
+            log_info "Reorganize by moving files"
+        fi
         _mode=1
     ;;
     copy)
-        log_info "Reorganize by copying files"
+        if [[ $single_file_logging -eq 0 ]]; then
+            log_info "Reorganize by copying files"
+        fi
         _mode=2
     ;;
     *)
